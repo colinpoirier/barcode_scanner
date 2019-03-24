@@ -1,23 +1,20 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:barcode_scanner/detector_painter.dart';
+import 'package:firebase_ml_vision/firebase_ml_vision.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+
 
 void main() => runApp(MyApp());
 
 class MyApp extends StatelessWidget {
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Flutter Demo',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
         primarySwatch: Colors.blue,
       ),
       home: MyHomePage(title: 'Flutter Demo Home Page'),
@@ -28,15 +25,6 @@ class MyApp extends StatelessWidget {
 class MyHomePage extends StatefulWidget {
   MyHomePage({Key key, this.title}) : super(key: key);
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
   final String title;
 
   @override
@@ -44,68 +32,186 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  File _imageFile;
+  Size _imageSize;
+  dynamic _scanResults;
+  Detector _currentDetector = Detector.text;
 
-  void _incrementCounter() {
+  Future<void> _getAndScanImage() async {
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _imageFile = null;
+      _imageSize = null;
     });
+
+    final File imageFile =
+        await ImagePicker.pickImage(source: ImageSource.camera);
+
+    if (imageFile != null) {
+      _getImageSize(imageFile);
+      _scanImage(imageFile);
+    }
+
+    setState(() {
+      _imageFile = imageFile;
+    });
+  }
+
+  Future<void> _getImageSize(File imageFile) async {
+    final Completer<Size> completer = Completer<Size>();
+
+    final Image image = Image.file(imageFile);
+    image.image.resolve(const ImageConfiguration()).addListener(
+      (ImageInfo info, bool _) {
+        completer.complete(Size(
+          info.image.width.toDouble(),
+          info.image.height.toDouble(),
+        ));
+      },
+    );
+
+    final Size imageSize = await completer.future;
+    setState(() {
+      _imageSize = imageSize;
+    });
+  }
+
+  Future<void> _scanImage(File imageFile) async {
+    setState(() {
+      _scanResults = null;
+    });
+
+    final FirebaseVisionImage visionImage =
+        FirebaseVisionImage.fromFile(imageFile);
+
+    dynamic results;
+    switch (_currentDetector) {
+      case Detector.barcode:
+        final BarcodeDetector detector =
+            FirebaseVision.instance.barcodeDetector();
+        results = await detector.detectInImage(visionImage);
+        break;
+      case Detector.face:
+        final FaceDetector detector = FirebaseVision.instance.faceDetector();
+        results = await detector.processImage(visionImage);
+        break;
+      case Detector.label:
+        final LabelDetector detector = FirebaseVision.instance.labelDetector();
+        results = await detector.detectInImage(visionImage);
+        break;
+      case Detector.cloudLabel:
+        final CloudLabelDetector detector =
+            FirebaseVision.instance.cloudLabelDetector();
+        results = await detector.detectInImage(visionImage);
+        break;
+      case Detector.text:
+        final TextRecognizer recognizer =
+            FirebaseVision.instance.textRecognizer();
+        results = await recognizer.processImage(visionImage);
+        break;
+      default:
+        return;
+    }
+
+    setState(() {
+      _scanResults = results;
+    });
+  }
+
+  CustomPaint _buildResults(Size imageSize, dynamic results) {
+    CustomPainter painter;
+
+    switch (_currentDetector) {
+      case Detector.barcode:
+        painter = BarcodeDetectorPainter(_imageSize, results);
+        break;
+      case Detector.face:
+        painter = FaceDetectorPainter(_imageSize, results);
+        break;
+      case Detector.label:
+        painter = LabelDetectorPainter(_imageSize, results);
+        break;
+      case Detector.cloudLabel:
+        painter = LabelDetectorPainter(_imageSize, results);
+        break;
+      case Detector.text:
+        painter = TextDetectorPainter(_imageSize, results);
+        break;
+      default:
+        break;
+    }
+
+    return CustomPaint(
+      painter: painter,
+    );
+  }
+
+  Widget _buildImage() {
+    return Container(
+      constraints: const BoxConstraints.expand(),
+      decoration: BoxDecoration(
+        image: DecorationImage(
+          image: Image.file(_imageFile).image,
+          fit: BoxFit.fill,
+        ),
+      ),
+      child: _imageSize == null || _scanResults == null
+          ? const Center(
+              child: Text(
+                'Scanning...',
+                style: TextStyle(
+                  color: Colors.green,
+                  fontSize: 30.0,
+                ),
+              ),
+            )
+          : _buildResults(_imageSize, _scanResults),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('ML Vision Example'),
+        actions: <Widget>[
+          PopupMenuButton<Detector>(
+            onSelected: (Detector result) {
+              _currentDetector = result;
+              if (_imageFile != null) _scanImage(_imageFile);
+            },
+            itemBuilder: (BuildContext context) => <PopupMenuEntry<Detector>>[
+                  const PopupMenuItem<Detector>(
+                    child: Text('Detect Barcode'),
+                    value: Detector.barcode,
+                  ),
+                  const PopupMenuItem<Detector>(
+                    child: Text('Detect Face'),
+                    value: Detector.face,
+                  ),
+                  const PopupMenuItem<Detector>(
+                    child: Text('Detect Label'),
+                    value: Detector.label,
+                  ),
+                  const PopupMenuItem<Detector>(
+                    child: Text('Detect Cloud Label'),
+                    value: Detector.cloudLabel,
+                  ),
+                  const PopupMenuItem<Detector>(
+                    child: Text('Detect Text'),
+                    value: Detector.text,
+                  ),
+                ],
+          ),
+        ],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Invoke "debug painting" (press "p" in the console, choose the
-          // "Toggle Debug Paint" action from the Flutter Inspector in Android
-          // Studio, or the "Toggle Debug Paint" command in Visual Studio Code)
-          // to see the wireframe for each widget.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            Text(
-              'You have pushed the button this many times:',
-            ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.display1,
-            ),
-          ],
-        ),
-      ),
+      body: _imageFile == null
+          ? const Center(child: Text('No image selected.'))
+          : _buildImage(),
       floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+        onPressed: _getAndScanImage,
+        tooltip: 'Pick Image',
+        child: const Icon(Icons.add_a_photo),
+      ),
     );
   }
 }
