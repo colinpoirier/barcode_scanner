@@ -1,216 +1,181 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:barcode_scanner/detector_painter.dart';
-import 'package:firebase_ml_vision/firebase_ml_vision.dart';
+import 'package:barcode_scanner/bloc_provider_stateful.dart';
+import 'package:barcode_scanner/database_viewer.dart';
+import 'package:barcode_scanner/get_barcode_data/get_barcode_data.dart';
+import 'package:barcode_scanner/scanned_barcode_data.dart';
+import 'package:barcode_scanner/scanned_barcodes.dart';
+import 'package:barcode_scanner/scanner_bloc/scanner.dart';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:camera/camera.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
-
-void main() => runApp(MyApp());
+Future main() async {
+  List<CameraDescription> cameras = await availableCameras();
+  runApp(MyApp(cameras: cameras));
+}
 
 class MyApp extends StatelessWidget {
+  final List<CameraDescription> cameras;
+
+  MyApp({Key key, this.cameras}) : super(key: key);
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
+    return BlocProviderStateful(
+      child: MaterialApp(
+        title: 'Flutter Demo',
+        theme: ThemeData(
+          primarySwatch: Colors.blue,
+        ),
+        home: MyHomePage(
+          title: 'Flutter Demo Home Page',
+          cameras: cameras,
+        ),
       ),
-      home: MyHomePage(title: 'Flutter Demo Home Page'),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, this.title}) : super(key: key);
+  MyHomePage({Key key, this.title, this.cameras}) : super(key: key);
 
   final String title;
+  final List<CameraDescription> cameras;
 
   @override
   _MyHomePageState createState() => _MyHomePageState();
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  File _imageFile;
-  Size _imageSize;
-  dynamic _scanResults;
-  Detector _currentDetector = Detector.text;
+  CameraController cameraController;
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  Future<void> _getAndScanImage() async {
-    setState(() {
-      _imageFile = null;
-      _imageSize = null;
-    });
-
-    final File imageFile =
-        await ImagePicker.pickImage(source: ImageSource.camera);
-
-    if (imageFile != null) {
-      _getImageSize(imageFile);
-      _scanImage(imageFile);
-    }
-
-    setState(() {
-      _imageFile = imageFile;
-    });
-  }
-
-  Future<void> _getImageSize(File imageFile) async {
-    final Completer<Size> completer = Completer<Size>();
-
-    final Image image = Image.file(imageFile);
-    image.image.resolve(const ImageConfiguration()).addListener(
-      (ImageInfo info, bool _) {
-        completer.complete(Size(
-          info.image.width.toDouble(),
-          info.image.height.toDouble(),
-        ));
-      },
-    );
-
-    final Size imageSize = await completer.future;
-    setState(() {
-      _imageSize = imageSize;
-    });
-  }
-
-  Future<void> _scanImage(File imageFile) async {
-    setState(() {
-      _scanResults = null;
-    });
-
-    final FirebaseVisionImage visionImage =
-        FirebaseVisionImage.fromFile(imageFile);
-
-    dynamic results;
-    switch (_currentDetector) {
-      case Detector.barcode:
-        final BarcodeDetector detector =
-            FirebaseVision.instance.barcodeDetector();
-        results = await detector.detectInImage(visionImage);
-        break;
-      case Detector.face:
-        final FaceDetector detector = FirebaseVision.instance.faceDetector();
-        results = await detector.processImage(visionImage);
-        break;
-      case Detector.label:
-        final LabelDetector detector = FirebaseVision.instance.labelDetector();
-        results = await detector.detectInImage(visionImage);
-        break;
-      case Detector.cloudLabel:
-        final CloudLabelDetector detector =
-            FirebaseVision.instance.cloudLabelDetector();
-        results = await detector.detectInImage(visionImage);
-        break;
-      case Detector.text:
-        final TextRecognizer recognizer =
-            FirebaseVision.instance.textRecognizer();
-        results = await recognizer.processImage(visionImage);
-        break;
-      default:
+  @override
+  void initState() {
+    super.initState();
+    cameraController =
+        CameraController(widget.cameras[0], ResolutionPreset.medium);
+    cameraController.initialize().then((_) {
+      if (!mounted) {
         return;
-    }
-
-    setState(() {
-      _scanResults = results;
+      }
+      setState(() {});
     });
   }
 
-  CustomPaint _buildResults(Size imageSize, dynamic results) {
-    CustomPainter painter;
-
-    switch (_currentDetector) {
-      case Detector.barcode:
-        painter = BarcodeDetectorPainter(_imageSize, results);
-        break;
-      case Detector.face:
-        painter = FaceDetectorPainter(_imageSize, results);
-        break;
-      case Detector.label:
-        painter = LabelDetectorPainter(_imageSize, results);
-        break;
-      case Detector.cloudLabel:
-        painter = LabelDetectorPainter(_imageSize, results);
-        break;
-      case Detector.text:
-        painter = TextDetectorPainter(_imageSize, results);
-        break;
-      default:
-        break;
-    }
-
-    return CustomPaint(
-      painter: painter,
-    );
+  @override
+  void dispose() {
+    cameraController?.dispose();
+    super.dispose();
   }
 
-  Widget _buildImage() {
-    return Container(
-      constraints: const BoxConstraints.expand(),
-      decoration: BoxDecoration(
-        image: DecorationImage(
-          image: Image.file(_imageFile).image,
-          fit: BoxFit.fill,
-        ),
-      ),
-      child: _imageSize == null || _scanResults == null
-          ? const Center(
-              child: Text(
-                'Scanning...',
-                style: TextStyle(
-                  color: Colors.green,
-                  fontSize: 30.0,
-                ),
-              ),
-            )
-          : _buildResults(_imageSize, _scanResults),
-    );
+  Future<void> _takeAndScanImage() async {
+    takePicture().then((String imagePath) {
+      if (mounted && imagePath != null) {
+        showInSnackBar('Picture saved to $imagePath');
+        BlocProvider.of<ScannerBloc>(context)
+            .dispatch(Scanner(imagePath: imagePath));
+      }
+    });
+  }
+
+  String timestamp() => DateTime.now().millisecondsSinceEpoch.toString();
+
+  Future<String> takePicture() async {
+    if (!cameraController.value.isInitialized) {
+      return null;
+    }
+    final Directory extDir = await getApplicationDocumentsDirectory();
+    final String dirPath = '${extDir.path}/Pictures/temp';
+    await Directory(dirPath).create(recursive: true);
+    final String imagePath = '$dirPath/${timestamp()}.jpg';
+    if (cameraController.value.isTakingPicture) {
+      return null;
+    }
+    try {
+      await cameraController.takePicture(imagePath);
+    } on CameraException catch (e) {
+      _showCameraException(e);
+      return null;
+    }
+    return imagePath;
+  }
+
+  void showInSnackBar(String message) {
+    _scaffoldKey.currentState.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void logError(String code, String message) =>
+      print('Error: $code\nError Message: $message');
+
+  void _showCameraException(CameraException e) {
+    logError(e.code, e.description);
+    showInSnackBar('Error: ${e.code}\n${e.description}');
+  }
+
+  void _addToDataBase(GetBarcodeDataState gbds) {
+    if (gbds is HasData) {
+      Firestore.instance.collection('products').add({
+        'barcode': gbds.data.barcodeNumber,
+        'name': gbds.data.productName,
+        'brand': gbds.data.brand,
+        'image': gbds.data.images[0]
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final getBarcodeData = BlocProvider.of<GetBarcodeDataBloc>(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text('ML Vision Example'),
         actions: <Widget>[
-          PopupMenuButton<Detector>(
-            onSelected: (Detector result) {
-              _currentDetector = result;
-              if (_imageFile != null) _scanImage(_imageFile);
+          IconButton(
+            icon: const Icon(Icons.list),
+            onPressed: () {
+              Navigator.of(context).push(MaterialPageRoute(builder: (context) {
+                return DatabaseViewer();
+              }));
             },
-            itemBuilder: (BuildContext context) => <PopupMenuEntry<Detector>>[
-                  const PopupMenuItem<Detector>(
-                    child: Text('Detect Barcode'),
-                    value: Detector.barcode,
-                  ),
-                  const PopupMenuItem<Detector>(
-                    child: Text('Detect Face'),
-                    value: Detector.face,
-                  ),
-                  const PopupMenuItem<Detector>(
-                    child: Text('Detect Label'),
-                    value: Detector.label,
-                  ),
-                  const PopupMenuItem<Detector>(
-                    child: Text('Detect Cloud Label'),
-                    value: Detector.cloudLabel,
-                  ),
-                  const PopupMenuItem<Detector>(
-                    child: Text('Detect Text'),
-                    value: Detector.text,
-                  ),
-                ],
-          ),
+          )
         ],
       ),
-      body: _imageFile == null
-          ? const Center(child: Text('No image selected.'))
-          : _buildImage(),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _getAndScanImage,
-        tooltip: 'Pick Image',
-        child: const Icon(Icons.add_a_photo),
+      body: Column(
+        children: <Widget>[
+          Container(
+            height: MediaQuery.of(context).size.height / 2,
+            child: AspectRatio(
+              aspectRatio: cameraController.value.aspectRatio,
+              child: CameraPreview(cameraController),
+            ),
+          ),
+          ScannedBarcodes(),
+          ScannedBarcodeData()
+        ],
+      ),
+      floatingActionButton: Row(
+        children: <Widget>[
+          FloatingActionButton(
+            onPressed: _takeAndScanImage,
+            tooltip: 'Pick Image',
+            child: const Icon(Icons.add_a_photo),
+          ),
+          SizedBox(
+            width: 150,
+          ),
+          FloatingActionButton(
+            onPressed: getBarcodeData.state is HasData
+                ? () => _addToDataBase(getBarcodeData.currentState)
+                : null,
+            tooltip: 'Upload to Cloud',
+            child: const Icon(Icons.cloud_upload),
+          )
+        ],
       ),
     );
   }
